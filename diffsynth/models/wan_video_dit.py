@@ -27,9 +27,13 @@ try:
 except ModuleNotFoundError:
     SAGE_ATTN_AVAILABLE = False
 
-from block_sparse_attn import block_sparse_attn_func
 from PIL import Image
 import numpy as np
+
+import torch_npu
+from torch_npu.contrib import transfer_to_npu
+import mindiesd
+from mindiesd.layers.flash_attn.sparse_flash_attn_rf_v2 import rain_fusion_attention 
 
 
 # ----------------------------
@@ -167,39 +171,56 @@ def generate_causal_block_mask(batch_size, nheads, seqlen, local_num, window_siz
     causal_mask = causal_mask.unsqueeze(0).unsqueeze(0).repeat(batch_size, nheads, 1, 1)
     return causal_mask
 
+def get_mask_index(mask):
+    b, n, s1, s2 = mask.shape
+    device = mask.device
+    
+    mask_reshaped = mask.reshape(-1, s1, s2)
+    batch_size = mask_reshaped.shape[0]
+    
+    row_indices = torch.arange(s2, device=device).expand(batch_size, s1, s2)
+    sorted_vals = torch.where(mask_reshaped, row_indices, 1e9).to(torch.float32)
+    sorted_vals, _ = torch.sort(sorted_vals, dim=-1)
+    valid_count = mask_reshaped.sum(dim=-1, keepdim=True)
+    keep_mask = row_indices < valid_count
+    result = torch.where(keep_mask, sorted_vals, -1)
+    
+    pos_matrix = result.reshape(b, n, s1, s2).to(torch.int64)
+    return pos_matrix
 
 # ----------------------------
 # Attention kernels
 # ----------------------------
-def flash_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, num_heads: int, compatibility_mode=False, attention_mask=None, return_KV=False):
+def flash_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, num_heads: int, compatibility_mode=False, attention_mask=None, return_KV=False, blockShape=None):
     if attention_mask is not None:
-        seqlen = q.shape[1]
-        seqlen_kv = k.shape[1]
-        q = rearrange(q, "b s (n d) -> (b s) n d", n=num_heads)
-        k = rearrange(k, "b s (n d) -> (b s) n d", n=num_heads)
-        v = rearrange(v, "b s (n d) -> (b s) n d", n=num_heads)
-        cu_seqlens_q = torch.tensor([0, seqlen], device=q.device, dtype=torch.int32)
-        cu_seqlens_k = torch.tensor([0, seqlen_kv], device=q.device, dtype=torch.int32)
-        head_mask_type = torch.tensor([1]*num_heads, device=q.device, dtype=torch.int32)
-        streaming_info = None
-        base_blockmask = attention_mask
-        max_seqlen_q_ = seqlen
-        max_seqlen_k_ = seqlen_kv
-        p_dropout = 0.0
-        x = block_sparse_attn_func(
+        batch, _, headDims = q.shape
+        headDim = headDims // num_heads
+
+        selectIdx = get_mask_index(attention_mask)
+        selectIdx = selectIdx[0].transpose(0,1)
+        selectNumIdx = attention_mask[0].transpose(0,1).sum(dim=-1)
+
+        blockShape = [blockShape, blockShape]
+        actualSeqLengthsHost = [q.shape[1] for _ in range(batch)]
+        actualSeqLengthsKvHost = [k.shape[1] for _ in range(batch)]
+        scale = headDim ** -0.5
+
+        q = rearrange(q, "b s (n d) -> b s n d", n=num_heads).transpose(1,2).contiguous()
+        k = rearrange(k, "b s (n d) -> b s n d", n=num_heads).transpose(1,2).contiguous()
+        v = rearrange(v, "b s (n d) -> b s n d", n=num_heads).transpose(1,2).contiguous()
+
+        x = rain_fusion_attention(
             q, k, v,
-            cu_seqlens_q, cu_seqlens_k,
-            head_mask_type,
-            streaming_info,
-            base_blockmask,
-            max_seqlen_q_, max_seqlen_k_,
-            p_dropout,
-            deterministic=False,
-            softmax_scale=None,
-            is_causal=False,
-            exact_streaming=False,
-            return_attn_probs=False,
-        ).unsqueeze(0)
+            scale=scale,
+            head_num=num_heads,
+            input_layout="BNSD",
+            select_idx=selectIdx,
+            select_num_idx=selectNumIdx,
+            blockshape=blockShape,
+            actual_seq_lengths=actualSeqLengthsHost,
+            actual_seq_lengths_kv=actualSeqLengthsKvHost,
+        )
+        x = rearrange(x, "b n s d -> b s n d", n=num_heads)
         x = rearrange(x, "b s n d -> b s (n d)", n=num_heads)
     elif compatibility_mode:
         q = rearrange(q, "b s (n d) -> b n s d", n=num_heads)
@@ -264,10 +285,10 @@ def precompute_freqs_cis(dim: int, end: int = 1024, theta: float = 10000.0):
 
 def rope_apply(x, freqs, num_heads):
     x = rearrange(x, "b s (n d) -> b s n d", n=num_heads)
-    x_out = torch.view_as_complex(x.to(torch.float64).reshape(
-        x.shape[0], x.shape[1], x.shape[2], -1, 2))
-    x_out = torch.view_as_real(x_out * freqs).flatten(2)
-    return x_out.to(x.dtype)
+    cos, sin = torch.chunk(torch.view_as_real(freqs), 2, dim=-1)
+    cos = cos.unsqueeze(0).expand(-1, -1, -1, -1, 2).flatten(-2)
+    sin = sin.unsqueeze(0).expand(-1, -1, -1, -1, 2).flatten(-2)
+    return mindiesd.rotary_position_embedding(x, cos, sin, rotated_mode="rotated_interleaved", fused=True)
 
 
 # ----------------------------
@@ -279,12 +300,8 @@ class RMSNorm(nn.Module):
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(dim))
 
-    def norm(self, x):
-        return x * torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + self.eps)
-
     def forward(self, x):
-        dtype = x.dtype
-        return self.norm(x.float()).to(dtype) * self.weight
+        return torch_npu.npu_rms_norm(x, self.weight, epsilon=self.eps)[0]
 
 
 class AttentionModule(nn.Module):
@@ -292,8 +309,8 @@ class AttentionModule(nn.Module):
         super().__init__()
         self.num_heads = num_heads
         
-    def forward(self, q, k, v, attention_mask=None):
-        x = flash_attention(q=q, k=k, v=v, num_heads=self.num_heads, attention_mask=attention_mask)
+    def forward(self, q, k, v, attention_mask=None, blockShape=None):
+        x = flash_attention(q=q, k=k, v=v, num_heads=self.num_heads, attention_mask=attention_mask, blockShape=blockShape)
         return x
 
 
@@ -361,8 +378,9 @@ class SelfAttention(nn.Module):
             self.local_attn_mask_w = w//8
             self.local_range = local_range
         attention_mask = generate_draft_block_mask(B, self.num_heads, seqlen, q_w, k_w, topk=topk, local_attn_mask=self.local_attn_mask)
+        attention_mask[:, :, :, 0] = True
 
-        x = self.attn(reorder_q, reorder_k, reorder_v, attention_mask)
+        x = self.attn(reorder_q, reorder_k, reorder_v, attention_mask, blockShape=block_s)
 
         cur_block_n, cur_block_s, _ = k_w.shape
         cache_num = cur_block_n // one_len

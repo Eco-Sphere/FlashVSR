@@ -13,6 +13,9 @@ from diffsynth import ModelManager, FlashVSRTinyLongPipeline
 from utils.utils import Causal_LQ4x_Proj
 from utils.TCDecoder import build_tcdecoder
 
+import torch_npu
+from torch_npu.contrib import transfer_to_npu
+
 def tensor2video(frames):
     frames = rearrange(frames, "C T H W -> T H W C")
     frames = ((frames.float() + 1) * 127.5).clip(0, 255).cpu().numpy().astype(np.uint8)
@@ -84,7 +87,7 @@ def upscale_then_center_crop(img: Image.Image, scale: float, tW: int, tH: int) -
     return up.crop((l, t, l + tW, t + tH))
 
 
-def prepare_input_tensor(path: str, scale: float = 4, dtype=torch.bfloat16, device='cuda'):
+def prepare_input_tensor(path: str, scale: float = 2, dtype=torch.bfloat16, device='cuda'):
     if os.path.isdir(path):
         paths0 = list_images_natural(path)
         if not paths0:
@@ -197,15 +200,36 @@ def init_pipeline():
     pipe.init_cross_kv(); pipe.load_models_to_device(["dit","vae"])
     return pipe
 
+def warm_up(pipeline, path: str, scale: int = 2, dtype=torch.bfloat16, device='cuda', sparse_ratio: float=2.0,seed=0):
+    name = os.path.basename(path.rstrip('/'))
+    try:
+        LQ, th, tw, F, fps = prepare_input_tensor(path, scale=scale, dtype=dtype, device=device)
+    except Exception as e:
+        print(f"[Error] {name}: {e}")
+    pipeline(
+        prompt="", negative_prompt="", cfg_scale=1.0, num_inference_steps=1, seed=seed, 
+        tiled=False,# Disable tiling: faster inference but higher VRAM usage. 
+                    # Set to True for lower memory consumption at the cost of speed.
+        LQ_video=LQ, num_frames=F, height=th, width=tw, is_full_block=False, if_buffer=True,
+        topk_ratio=sparse_ratio*768*1280/(th*tw), 
+        kv_ratio=3.0,
+        local_range=11, # Recommended: 9 or 11. local_range=9 → sharper details; 11 → more stable results.
+        color_fix = True,
+    )
+
 def main():
     RESULT_ROOT = "./results"
     os.makedirs(RESULT_ROOT, exist_ok=True)
     inputs = [
         "./inputs/example4.mp4",
     ]
-    seed, scale, dtype, device = 0, 4.0, torch.bfloat16, 'cuda'
+    warm_up_file = "./inputs/example0.mp4"
+    seed, scale, dtype, device = 0, 2.0, torch.bfloat16, 'cuda'
     sparse_ratio = 2.0      # Recommended: 1.5 or 2.0. 1.5 → faster; 2.0 → more stable.
     pipe = init_pipeline()
+
+    # warm up
+    warm_up(pipe, warm_up_file, scale, dtype, device, sparse_ratio, seed)
 
     for p in inputs:
         torch.cuda.empty_cache(); torch.cuda.ipc_collect()
@@ -217,6 +241,7 @@ def main():
         except Exception as e:
             print(f"[Error] {name}: {e}"); continue
 
+        inference_start_time = time.time()
         video = pipe(
             prompt="", negative_prompt="", cfg_scale=1.0, num_inference_steps=1, seed=seed,
             LQ_video=LQ, num_frames=F, height=th, width=tw, is_full_block=False, if_buffer=True,
@@ -225,6 +250,9 @@ def main():
             local_range=11,  # Recommended: 9 or 11. local_range=9 → sharper details; 11 → more stable results.
             color_fix = True,
         )
+        inference_end_time = time.time()
+        inference_duration = inference_end_time - inference_start_time
+        print(f"Inference completed in {inference_duration:.2f} seconds")
 
         video = tensor2video(video)
         save_video(video, os.path.join(RESULT_ROOT, f"FlashVSR_v1.1_Tiny_Long_{name.split('.')[0]}_seed{seed}.mp4"), fps=fps, quality=5)

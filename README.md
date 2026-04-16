@@ -1,235 +1,96 @@
-# ⚡ FlashVSR
+# FlashVSR-v1.1-推理指导
 
-**Towards Real-Time Diffusion-Based Streaming Video Super-Resolution**
+## 概述
+FlashVSR 是一个面向实时扩散模型的流式视频超分 辨率框架，旨在通过实现高效性、可扩展性和实时性能，使基于扩散模型的视频超分辨率技术变得实用化。
 
-**Authors:** Junhao Zhuang, Shi Guo, Xin Cai, Xiaohui Li, Yihao Liu, Chun Yuan, Tianfan Xue
+本文的介绍了FlashVSR-v1.1模型的部署流程，包括推理环境准备、模型部署、功能验证，旨在帮助用户快速完成模型部署和验证。
 
-<a href='http://zhuang2002.github.io/FlashVSR'><img src='https://img.shields.io/badge/Project-Page-Green'></a> &nbsp;
-<a href="https://huggingface.co/JunhaoZhuang/FlashVSR"><img src="https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Model%20(v1)-blue"></a> &nbsp;
-<a href="https://huggingface.co/JunhaoZhuang/FlashVSR-v1.1"><img src="https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Model%20(v1.1)-blue"></a> &nbsp;
-<a href="https://huggingface.co/datasets/JunhaoZhuang/VSR-120K"><img src="https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Dataset-orange"></a> &nbsp;
-<a href="https://arxiv.org/abs/2510.12747"><img src="https://img.shields.io/badge/arXiv-2510.12747-b31b1b.svg"></a>
+- 版本说明：
 
-**Your star means a lot for us to develop this project!** :star:
 
-<img src="./examples/WanVSR/assets/teaser.png" />
-
----
-
-### 🌟 Abstract
-
-Diffusion models have recently advanced video restoration, but applying them to real-world video super-resolution (VSR) remains challenging due to high latency, prohibitive computation, and poor generalization to ultra-high resolutions. Our goal in this work is to make diffusion-based VSR practical by achieving **efficiency, scalability, and real-time performance**. To this end, we propose **FlashVSR**, the first diffusion-based one-step streaming framework towards real-time VSR. **FlashVSR runs at ∼17 FPS for 768 × 1408 videos on a single A100 GPU** by combining three complementary innovations: (i) a train-friendly three-stage distillation pipeline that enables streaming super-resolution, (ii) locality-constrained sparse attention that cuts redundant computation while bridging the train–test resolution gap, and (iii) a tiny conditional decoder that accelerates reconstruction without sacrificing quality. To support large-scale training, we also construct **VSR-120K**, a new dataset with 120k videos and 180k images. Extensive experiments show that FlashVSR scales reliably to ultra-high resolutions and achieves **state-of-the-art performance with up to ∼12× speedup** over prior one-step diffusion VSR models.
-
----
-
-### 📰 News
-
-- **Nov 2025 — 🎉 [FlashVSR v1.1](https://huggingface.co/JunhaoZhuang/FlashVSR-v1.1) released:** enhanced stability + fidelity  
-- **Oct 2025 — [FlashVSR v1](https://huggingface.co/JunhaoZhuang/FlashVSR)  (initial release)**: Inference code and model weights are available now! 🎉  
-- **Bug Fix (October 21, 2025):** Fixed `local_attention_mask` update logic to prevent artifacts when switching between different aspect ratios during continuous inference.  
-- **Coming Soon:** Dataset release (**VSR-120K**) for large-scale training.
-
----
-### 🌐 Community Integrations
-
-Thanks to the community for the fast adoption of FlashVSR! Below are some third-party integrations:
-
-**ComfyUI Support**
-- **[smthemex/ComfyUI_FlashVSR](https://github.com/smthemex/ComfyUI_FlashVSR)** — closer to the official implementation  
-- **[lihaoyun6/ComfyUI-FlashVSR_Ultra_Fast](https://github.com/lihaoyun6/ComfyUI-FlashVSR_Ultra_Fast)** — modified attention behavior, easier installation, and added `tile_dit`; I have not personally tested this version
-- **[naxci1/ComfyUI-FlashVSR_Stable](https://github.com/naxci1/ComfyUI-FlashVSR_Stable)** — community-maintained stable ComfyUI implementation with VRAM optimizations
-- **WanVideoWrapper** — integrated support but currently has known issues  
-  https://github.com/kijai/ComfyUI-WanVideoWrapper/issues/1441
-
-**Cloud / API Deployments**  
-(These third-party services offer ready-to-use online inference, making it easy to try FlashVSR without any setup or GPU requirements. However, it’s unclear whether they run v1 or v1.1 or whether the full pipeline is implemented, so results may differ from the official version. 🤷‍♂️ For the most accurate and complete reproduction, we recommend using the official repository when possible.)
-
-- fal.ai: https://fal.ai/models/fal-ai/flashvsr/upscale/video  
-- WaveSpeed AI: https://wavespeed.ai/models/wavespeed-ai/flashvsr  
-- Segmind: https://www.segmind.com/models/flashvsr  
-- Genbo AI: https://genbo.ai/models/toVideo/Flash-VSR
-- JAI Portal: https://www.jaiportal.com/model/flashvsr  
-- FlashVSR Online Service (third-party): https://flashvsr.org  
-- GigapixelAI Video Upscaler (FlashVSR option): https://gigapixelai.com/ai-video-upscaler
----
-
-### 📢 Important Quality Note (ComfyUI & other third-party implementations)
-
-First of all, huge thanks to the community for the fast adoption, feedback, and contributions to FlashVSR! 🙌  
-During community testing, we noticed that some third-party implementations of FlashVSR (e.g. early ComfyUI versions) do **not include our Locality-Constrained Sparse Attention (LCSA)** module and instead fall back to **dense attention**. This may lead to **noticeable quality degradation**, especially at higher resolutions.  
-Community discussion: https://github.com/kijai/ComfyUI-WanVideoWrapper/issues/1441
-
-Below is a comparison example provided by a community member:
-
-| Fig.1 – LR Input Video | Fig.2 – 3rd-party (no LCSA) | Fig.3 – Official FlashVSR |
-|------------------|-----------------------------------------------|--------------------------------------|
-| <video src="https://github.com/user-attachments/assets/ea12a191-48d5-47c0-a8e5-e19ad13581a9" controls width="260"></video> | <video src="https://github.com/user-attachments/assets/c8e53bd5-7eca-420d-9cc6-2b9c06831047" controls width="260"></video> | <video src="https://github.com/user-attachments/assets/a4d80618-d13d-4346-8e37-38d2fabf9827" controls width="260"></video> |
-
-✅ The **official FlashVSR pipeline (this repository)**:
-- **Better preserves fine structures and details**
-- **Effectively avoids texture aliasing and visual artifacts**
-
-Thanks again to the community for actively testing and helping improve FlashVSR together! 🚀
-
----
-
-### 📋 TODO
-
-- ✅ Release inference code and model weights  
-- ⬜ Release dataset (VSR-120K)
-
----
-
-### 🚀 Getting Started
-
-Follow these steps to set up and run **FlashVSR** on your local machine:
-
-> ⚠️ **Note:** This project is primarily designed and optimized for **4× video super-resolution**.  
-> We **strongly recommend** using the **4× SR setting** to achieve better results and stability. ✅
-
-#### 1️⃣ Clone the Repository
-
-```bash
-git clone https://github.com/OpenImagingLab/FlashVSR
-cd FlashVSR
-````
-
-#### 2️⃣ Set Up the Python Environment
-
-Create and activate the environment (**Python 3.11.13**):
-
-```bash
-conda create -n flashvsr python=3.11.13
-conda activate flashvsr
+```
+url=https://github.com/OpenImagingLab/FlashVSR
+commit_id=b527c6f285fb30df530f5febc8b45764a789c961
 ```
 
-Install project dependencies:
+## 推理环境准备
+- 该模型需要以下插件与驱动  
+**表 1** 版本配套表
 
-```bash
+|配套|版本|环境准备指导|
+|--|--|--|
+|固件与驱动|25.5.2| [Pytorch框架推理环境准备](https://www.hiascend.com/document/detail/zh/ModelZoo/pytorchframework/pies)|
+|CANN|8.5.0|-|
+|Python|3.11|-|
+|PyTorch|2.6.0|-|
+|Ascend Extension PyTorch|2.6.0|-|
+|硬件|Atlas 800T A2, Atlas 800I A2|-|
+
+## 快速上手
+### 获取源码
+```
+git clone https://github.com/Eco-Sphere/FlashVSR.git
+cd FlashVSR
+git checkout dev/ascend
+cd ..
+git clone https://gitcode.com/Ascend/MindIE-SD.git
+cd MindIE-SD
+git reset --hard 4aa3014c21ea171c3255d2d2591debeaac9e5202
+cd ..
+```
+
+### 安装依赖
+```
+# openeuler
+yum update
+yum -y install opencv ffmpeg
+# ubuntu
+apt-get update
+apt-get install -y libgl1 libglib2.0-0 ffmpeg
+
+cd FlashVSR
 pip install -e .
 pip install -r requirements.txt
+cd ../MindIE-SD
+python setup.py bdist_wheel
+cd ..
+pip install MindIE-SD/dist/xxx.whl #根据实际情况修改xxx
 ```
-
-#### 3️⃣ Install Block-Sparse Attention (Required)
-
-FlashVSR relies on the **Block-Sparse Attention** backend to enable flexible and dynamic attention masking for efficient inference.
-
-> **⚠️ Note:**
->
-> * The Block-Sparse Attention build process can be memory-intensive, especially when compiling in parallel with multiple `ninja` jobs. It is recommended to keep sufficient memory available during compilation to avoid OOM errors. Once the build is complete, runtime memory usage is stable and not an issue.
-> * Based on our testing, the Block-Sparse Attention backend works correctly on **NVIDIA A100 and A800** (Ampere) with **ideal acceleration performance**, and it also runs correctly on **H200** (Hopper) but the acceleration is limited due to hardware scheduling differences and sparse kernel behavior. **Compatibility and performance on other GPUs (e.g., RTX 40/50 series or H800) are currently unknown**. For more details, please refer to the official documentation: https://github.com/mit-han-lab/Block-Sparse-Attention
-
-
-```bash
-# ✅ Recommended: clone and install in a separate clean folder (outside the FlashVSR repo)
-git clone https://github.com/mit-han-lab/Block-Sparse-Attention
-cd Block-Sparse-Attention
-pip install packaging
-pip install ninja
-python setup.py install
+### 获取权重
 ```
-
-#### 4️⃣ Download Model Weights from Hugging Face
-
-FlashVSR provides both **v1** and **v1.1** model weights on Hugging Face (via **Git LFS**).  
-Please install Git LFS first:
-
-```bash
-# From the repo root
-cd examples/WanVSR
-
-# Install Git LFS (once per machine)
+cd FlashVSR/examples/WanVSR
 git lfs install
-
-# Clone v1 (original) or v1.1 (recommended)
-git lfs clone https://huggingface.co/JunhaoZhuang/FlashVSR          # v1
-# or
-git lfs clone https://huggingface.co/JunhaoZhuang/FlashVSR-v1.1      # v1.1
+git clone https://huggingface.co/JunhaoZhuang/FlashVSR-v1.1
 ```
-
-After cloning, you should have one of the following folders:
-
+### 环境变量
 ```
-./examples/WanVSR/FlashVSR/          # v1
-./examples/WanVSR/FlashVSR-v1.1/     # v1.1
-│
-├── LQ_proj_in.ckpt
-├── TCDecoder.ckpt
-├── Wan2.1_VAE.pth
-├── diffusion_pytorch_model_streaming_dmd.safetensors
-└── README.md
+# 一级流水优化
+export TASK_QUEUE_ENABLE=1
+# combind标志，用于优化两个非连续算子组合类场景
+export COMBIND_ENABLE=1
+# CPU绑核
+export CPU_AFFINITY_CONF=1
 ```
-
-> Inference scripts automatically load weights from the corresponding folder.
-
----
-
-#### 5️⃣ Run Inference
-
-```bash
-# From the repo root
-cd examples/WanVSR
-
-# v1 (original)
-python infer_flashvsr_full.py
-# or
-python infer_flashvsr_tiny.py
-# or
-python infer_flashvsr_tiny_long_video.py
-
-# v1.1 (recommended)
+### 执行推理
+```
+# full模式
 python infer_flashvsr_v1.1_full.py
-# or
+# tiny模式
 python infer_flashvsr_v1.1_tiny.py
-# or
+# tiny_long模式
 python infer_flashvsr_v1.1_tiny_long_video.py
 ```
-
----
-
-### 🛠️ Method
-
-The overview of **FlashVSR**. This framework features:
-
-* **Three-Stage Distillation Pipeline** for streaming VSR training.
-* **Locality-Constrained Sparse Attention** to cut redundant computation and bridge the train–test resolution gap.
-* **Tiny Conditional Decoder** for efficient, high-quality reconstruction.
-* **VSR-120K Dataset** consisting of **120k videos** and **180k images**, supports joint training on both images and videos.
-
-<img src="./examples/WanVSR/assets/flowchart.jpg" width="1000" />
-
----
-
-### 🤗 Feedback & Support
-
-We welcome feedback and issues. Thank you for trying **FlashVSR**!
-
----
-
-### 📄 Acknowledgments
-
-We gratefully acknowledge the following open-source projects:
-
-* **DiffSynth Studio** — [https://github.com/modelscope/DiffSynth-Studio](https://github.com/modelscope/DiffSynth-Studio)
-* **Block-Sparse-Attention** — [https://github.com/mit-han-lab/Block-Sparse-Attention](https://github.com/mit-han-lab/Block-Sparse-Attention)
-* **taehv** — [https://github.com/madebyollin/taehv](https://github.com/madebyollin/taehv)
-
----
-
-### 📞 Contact
-
-* **Junhao Zhuang**
-  Email: [zhuangjh23@mails.tsinghua.edu.cn](mailto:zhuangjh23@mails.tsinghua.edu.cn)
-
----
-
-### 📜 Citation
-
-```bibtex
-@article{zhuang2025flashvsr,
-  title={FlashVSR: Towards Real-Time Diffusion-Based Streaming Video Super-Resolution},
-  author={Zhuang, Junhao and Guo, Shi and Cai, Xin and Li, Xiaohui and Liu, Yihao and Yuan, Chun and Xue, Tianfan},
-  journal={arXiv preprint arXiv:2510.12747},
-  year={2025}
-}
-```
+具体推理文件以及结果保存路径可以在推理脚本中配置，默认从`inputs`文件夹中读取视频文件(warm_up和正式推理文件)，输出结果到`results`中
+### 性能数据
+注：为了获取真实性能数据，推理前需要先进行warm_up  
+|机器|模式|输入尺寸|时长|放大倍率|输出|推理时长|
+|--|--|--|--|--|--|--|
+|Atlas 800T A2|full|384x384@30fps|2s|2.0|768x768@30fps|13.85s|
+|Atlas 800T A2|full|672x384@30fps|3s|2.0|1280x768@30fps|25.60s|
+|Atlas 800T A2|full|384x672@30fps|3s|2.0|768x1280@30fps|23.31s|
+|Atlas 800T A2|full|640x480@30fps|2s|2.0|1280x896@30fps|23.35s|
+|Atlas 800T A2|tiny|384x384@30fps|2s|2.0|768x768@30fps|11.25s|
+|Atlas 800T A2|tiny|672x384@30fps|3s|2.0|1280x768@30fps|20.20s|
+|Atlas 800T A2|tiny|384x672@30fps|3s|2.0|768x1280@30fps|19.99s|
+|Atlas 800T A2|tiny|640x480@30fps|2s|2.0|1280x896@30fps|19.04s|
+|Atlas 800T A2|tiny-long|768x416@30fps|54s|2.0|1536x768@30fps|498.74s|
